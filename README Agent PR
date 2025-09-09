@@ -1,0 +1,37 @@
+name: README Agent PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      instructions:
+        description: "請輸入要改動 README 的指令（中文可）"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: |
+          npm init -y
+          npm i openai @octokit/rest
+
+      - name: Run agent
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INSTRUCTIONS: ${{ inputs.instructions }}
+        run: node scripts/update-readme.mjs
