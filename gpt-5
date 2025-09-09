@@ -1,0 +1,6 @@
+.
+├─ .github/
+│  └─ workflows/
+│     └─ readme-agent.yml      # GitHub Actions 工作流程
+└─ scripts/
+   └─ update-readme.mjs        # Node.js 腳本（呼叫 OpenAI + 建分支 + 開 PR）
