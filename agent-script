@@ -1,0 +1,139 @@
+// scripts/update-readme.mjs
+import fs from "node:fs";
+import { execSync } from "node:child_process";
+import { Octokit } from "@octokit/rest";
+import OpenAI from "openai";
+
+const {
+  GITHUB_REPOSITORY = "",       // e.g. "owner/repo"
+  GITHUB_REF_NAME = "main",     // default branch name fallback
+  GITHUB_TOKEN,
+  OPENAI_API_KEY,
+  INSTRUCTIONS = "",
+} = process.env;
+
+if (!GITHUB_REPOSITORY) throw new Error("GITHUB_REPOSITORY is missing.");
+if (!GITHUB_TOKEN) throw new Error("GITHUB_TOKEN is missing.");
+if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is missing.");
+if (!INSTRUCTIONS) throw new Error("INSTRUCTIONS is empty.");
+
+const [owner, repo] = GITHUB_REPOSITORY.split("/");
+const octokit = new Octokit({ auth: GITHUB_TOKEN });
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+async function getDefaultBranch() {
+  const { data } = await octokit.repos.get({ owner, repo });
+  return data.default_branch || GITHUB_REF_NAME || "main";
+}
+
+function safeReadFile(path) {
+  return fs.existsSync(path) ? fs.readFileSync(path, "utf8") : "";
+}
+
+async function generateUpdatedReadme(currentReadme, instructions) {
+  // 這裡用 GPT-5 產生新的 README 內容（保留 Markdown、避免遺失既有章節）
+  const sys = `你是一個資深技術編輯與維運工程師。目標：根據使用者指令，改寫並優化 README.md。
+- 保留現有資訊中有價值的段落與連結。
+- 條列步驟清楚、標題階層一致（H1~H3）。
+- 若未指定語言，維持既有語言為主，補充新增章節可以雙語小標（可選）。
+- 嚴禁產生虛構指令與版本號。`;
+
+  const user = `
+[使用者的指令]
+${instructions}
+
+[目前的 README.md]
+${currentReadme || "(目前 repo 沒有 README.md，請全新撰寫)"}  
+`;
+
+  const resp = await openai.chat.completions.create({
+    model: "gpt-5", // 或 "gpt-4o" 也可以
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: user },
+    ],
+    temperature: 0.2,
+  });
+
+  const text = resp.choices?.[0]?.message?.content?.trim();
+  if (!text) throw new Error("OpenAI 沒有回傳內容。");
+  return text;
+}
+
+async function ensureGitIdentity() {
+  execSync(`git config user.name "readme-agent-bot"`);
+  execSync(`git config user.email "readme-agent-bot@users.noreply.github.com"`);
+}
+
+async function createBranchAndCommit(branchName, filePath, content) {
+  fs.writeFileSync(filePath, content, "utf8");
+  execSync(`git checkout -b ${branchName}`);
+  execSync(`git add ${filePath}`);
+  execSync(`git commit -m "docs(readme): automated update via agent"`);
+  // 使用 token 推上去
+  const remote = `https://${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git`;
+  execSync(`git push ${remote} ${branchName}`);
+}
+
+async function openPullRequest(base, head, title, body) {
+  const { data: pr } = await octokit.pulls.create({
+    owner,
+    repo,
+    title,
+    head,
+    base,
+    body,
+  });
+  return pr.html_url;
+}
+
+(async () => {
+  const defaultBranch = await getDefaultBranch();
+
+  // 1) 讀 README
+  const readmePath = "README.md";
+  const currentReadme = safeReadFile(readmePath);
+
+  // 2) 生成新 README
+  const updated = await generateUpdatedReadme(currentReadme, INSTRUCTIONS);
+
+  if (updated.trim() === currentReadme.trim()) {
+    console.log("內容無變更，略過建立 PR。");
+    process.exit(0);
+  }
+
+  // 3) 建新分支名稱
+  const stamp = new Date().toISOString().replace(/[:T.Z-]/g, "").slice(0, 14);
+  const branch = `chore/readme-agent-${stamp}`;
+
+  await ensureGitIdentity();
+
+  // 確保在 default branch 上
+  execSync(`git fetch origin ${defaultBranch}`);
+  execSync(`git checkout ${defaultBranch}`);
+  execSync(`git pull origin ${defaultBranch}`);
+
+  // 4) 寫檔 + commit + push
+  await createBranchAndCommit(branch, readmePath, updated);
+
+  // 5) 開 PR
+  const prUrl = await openPullRequest(
+    defaultBranch,
+    branch,
+    `docs(README): update via agent`,
+    [
+      "本 PR 由 README Agent 依照以下指令自動產生：",
+      "",
+      "```",
+      INSTRUCTIONS,
+      "```",
+      "",
+      "_若需修改，請在此 PR 留言補充指令、或手動編輯後合併。_",
+    ].join("\n")
+  );
+
+  console.log(`Pull Request created: ${prUrl}`);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
